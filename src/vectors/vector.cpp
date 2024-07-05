@@ -1,12 +1,8 @@
 #include "vector.hpp"
+#include "LSHIndex.hpp"
 #include <stdexcept>
 #include <cmath>
-#include "rapidjson/document.h"
-#include "rapidjson/writer.h"
-#include "rapidjson/stringbuffer.h"
-#include "rapidjson/prettywriter.h"
-#include <flann/flann.hpp>
-#include <flann/algorithms/lsh_index.h>
+#include "serializer.hpp"
 #include <fstream>
 
 // Private constructor used by Builder
@@ -103,56 +99,17 @@ void VectorDatabase::initializeDistanceFunction()
 
 void VectorDatabase::initializeLSHIndex()
 {
-    if (m_vectors.empty()) {return;} // No data to index
-
-    // Convert vectors to FLANN-compatible format
-    auto rawDataPtr = std::make_unique<double[]>(m_vectors.size() * m_dimension);
-        m_flannDataset = std::make_shared<flann::Matrix<double>>(
-            rawDataPtr.release(), m_vectors.size(), m_dimension);
-
-    for (size_t i = 0; i < m_vectors.size(); ++i) {
-        for (size_t j = i; j < m_dimension; ++j) {
-            m_flannDataset[i][j] = m_vectors[i](j);
-        }
-    }
-
-    // Set up LSH parameters
-    flann::LshIndexParams indexParams;
-    indexParams.table_number_ = m_numberOfHashTables;
-    indexParams.key_size_ = 20;  // You may want to make this configurable
-    indexParams.multi_probe_level_ = 2;  // You may want to make this configurable
-
-    // Create and build the LSH index
-    m_flannIndex = std::make_unique<flann::Index<flann::L2<double>>>(
-        m_flannDataset, indexParams);
-    m_flannIndex->buildIndex();
+    m_lshIndex = std::make_unique<LSHIndex>(m_dimension, m_numberOfHashTables);
+    m_lshIndex->buildIndex(m_vectors);
 }
 
 std::vector<size_t> VectorDatabase::findNearestNeighbors(const VectorXd& query, size_t k) const
 {
-    if (!m_flannIndex) {
+    if (!m_lshIndex) {
         throw std::runtime_error("LSH index not initialized");
     }
 
-    auto queryPoint = std::make_unique<flann::Matrix<double>>(
-        new double[m_dimension], 1, m_dimension);
-    
-    for (size_t i = 0; i < m_dimension; ++i) {
-        (*queryPoint)[0][i] = query(i);
-    }
-
-    std::vector<std::vector<int>> indices;
-    std::vector<std::vector<double>> distances;
-    flann::SearchParams searchParams(128);  // configurable
-    m_flannIndex->knnSearch(*queryPoint, indices, distances, k, searchParams);
-
-    // Convert FLANN indices to our internal indices
-    std::vector<size_t> result;
-    for (int index : indices[0]) {
-        result.push_back(static_cast<size_t>(index))
-    }
-
-    return result;
+    return m_lshIndex->findNearestNeighbors(query, k);
 }
 
 bool VectorDatabase::addVector(const VectorXd& vec)
@@ -165,15 +122,9 @@ bool VectorDatabase::addVector(const VectorXd& vec)
     m_idToIndexMap[m_nextId] = m_vectors.size() - 1;
     m_nextId++;
 
-    // Update FLANN index
-    if (m_flannIndex) {
-        flann::Matrix<double> newPoint(new double[m_dimension], 1, m_dimension);
-        for (size_t i = 0; i < m_dimension; ++i) {
-            newPoint[0][i] = vec(i);
-        }
-
-        m_flannIndex->addPoints(newPoint);
-        delete[] newPoint.ptr();
+    // Update LSH index
+    if (m_lshIndex) {
+        m_lshIndex->addPoint(vec);
     }
 
     return true;
@@ -189,93 +140,19 @@ VectorDatabase::VectorXd VectorDatabase::getVector(size_t index) const
 
 bool VectorDatabase::serialize(const std::string& filename) const
 {
-    rapidjson::Document document;
-    document.SetObject();
-    rapidjson::Document::AllocatorType& allocator = document.GetAllocator();
-
-    // Serialize vectors
-    rapidjson::Value vectorsArray(rapidjson::kArrayType);
-    for (const auto& vec : m_vectors) {
-        rapidjson::Value vectorObj(rapidjson::kArrayType);
-        for (int i = 0; i < vec.size(); ++i) {
-            vectorObj.PushBack(vec(i), allocator);
-        }
-        vectorsArray.PushBack(vectorObj, allocator);
-    }
-    document.AddMember("vectors", vectorsArray, allocator);
-
-    // Serialize other properties
-    document.AddMember("next_id", rapidjson::Value(m_nextId), allocator);
-    document.AddMember("capacity", rapidjson::Value(m_capacity), allocator);
-    document.AddMember("dimension", rapidjson::Value(m_dimension), allocator);
-    document.AddMember("distance_metric", rapidjson::Value(static_cast<int>(m_distanceMetric)), allocator);
-    document.AddMember("storage_path", rapidjson::Value(m_storagePath.c_str(), allocator), allocator);
-    document.AddMember("number_of_hash_tables", rapidjson::Value(m_numberOfHashTables), allocator);
-    document.AddMember("lsh_radius", rapidjson::Value(m_lshRadius), allocator);
-    //document.AddMember("mode", rapidjson::Value(static_cast<int>(m_mode)), allocator);
-    document.AddMember("log_level", rapidjson::Value(static_cast<int>(m_logLevel)), allocator);
-    document.AddMember("index_type", rapidjson::Value(static_cast<int>(m_indexType)), allocator);
-
-    // Convert to JSON string
-    rapidjson::StringBuffer buffer;
-    rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
-    document.Accept(writer);
-
-    // Write to file
-    std::ofstream file(filename);
-    if (!file) {
-        return false;
-    }
-
-    file << buffer.GetString();
-    return file.good();
+    return DatabaseSerializer::serialize(*this, filename);
 }
 
 bool VectorDatabase::deserialize(const std::string& filename)
 {
-    // Read file contents
-    std::ifstream file(filename);
-    if (!file) {
-        return false;
-    }
+    return DatabaseSerializer::deserialize(*this, filename);
+}
 
-    std::string json_str((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-
-    // Parse JSON
-    rapidjson::Document document;
-    if (document.Parse(json_str.c_str()).HasParseError()) {
-        return false;
-    }
-
-    // Clear existing data
+void VectorDatabase::clear()
+{
     m_vectors.clear();
     m_idToIndexMap.clear();
-
-    // Deserialize vectors
-    const rapidjson::Value& vectorsArray = document["vectors"];
-    for (const auto& vec_json : vectorsArray.GetArray()) {
-        VectorXd vec(vec_json.Size());
-        for (rapidjson::SizeType i = 0; i < vec_json.Size(); ++i) {
-            vec(i) = vec_json[i].GetDouble();
-        }
-        m_vectors.push_back(std::move(vec));
-    }
+    m_nextId = 0;
     
-    // Deserialize other properties
-    m_nextId = document["next_id"].GetUint64();
-    m_capacity = document["capacity"].GetUint64();
-    m_dimension = document["dimension"].GetUint();
-    m_distanceMetric = static_cast<DistanceMetric>(document["distance_metric"].GetInt());
-    m_storagePath = document["storage_path"].GetString();
-    m_numberOfHashTables = document["number_of_hash_tables"].GetUint();
-    m_lshRadius = document["lsh_radius"].GetDouble();
-    //m_mode = static_cast<Mode>(document["mode"].GetInt());
-    m_logLevel = static_cast<LogLevel>(document["log_level"].GetInt());
-    m_indexType = static_cast<IndexType>(document["index_type"].GetInt());
-
-    // Reinitialize components
-    initializeDistanceFunction();
-    initializeLSHIndex();
-
-    return true;
+    if (m_lshIndex) {m_lshIndex.reset();}
 }

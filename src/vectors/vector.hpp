@@ -4,15 +4,9 @@
 #include <unordered_map>
 #include <memory>
 #include <functional>
+#include "LSHIndex.hpp"
 
-namespace flann {
-    template <typename T>
-    class Index;
-    template <typename T>
-    struct L2;
-    template <typename T>
-    class Matrix;
-}
+class DatabaseSerializer; // Forward declaration
 
 class VectorDatabase {
     public:
@@ -56,7 +50,7 @@ class VectorDatabase {
         VectorDatabase(VectorDatabase&& other) noexcept; // Move constructor
         VectorDatabase& operator=(const VectorDatabase& other) = delete; // Copy assignment operator
         VectorDatabase& operator=(VectorDatabase&& other) noexcept; // Move assignment operator        
-        ~VectorDatabase() = default // Destructor
+        ~VectorDatabase() = default; // Destructor
         
 
     public: 
@@ -65,8 +59,34 @@ class VectorDatabase {
         bool serialize(const std::string& filename) const; // Serialize the entire database to a file
         bool deserialize(const std::string& filename); // Deserialize from a file into the database
         
+    public: //Getters and Setters for serialization
+        const std::vector<VectorXd>& getVectors() const { return m_vectors; }
+        size_t getNextId() const { return m_nextId; }
+        size_t getCapacity() const { return m_capacity; }
+        size_t getDimension() const { return m_dimension; }
+        DistanceMetric getDistanceMetric() const { return m_distanceMetric; }
+        const std::string& getStoragePath() const { return m_storagePath; }
+        size_t getNumberOfHashTables() const { return m_numberOfHashTables; }
+        double getLshRadius() const { return m_lshRadius; }
+        //Mode getMode() const { return m_mode; }
+        LogLevel getLogLevel() const { return m_logLevel; }
+        IndexType getIndexType() const { return m_indexType; }
 
+        // Add these setter methods for deserialization
+        void setNextId(size_t id) { m_nextId = id; }
+        void setCapacity(size_t capacity) { m_capacity = capacity; }
+        void setDimension(size_t dimension) { m_dimension = dimension; }
+        void setDistanceMetric(DistanceMetric metric) { m_distanceMetric = metric; }
+        void setStoragePath(const std::string& path) { m_storagePath = path; }
+        void setNumberOfHashTables(size_t num) { m_numberOfHashTables = num; }
+        void setLshRadius(double radius) { m_lshRadius = radius; }
+        //void setMode(Mode mode) { m_mode = mode; }
+        void setLogLevel(LogLevel level) { m_logLevel = level; }
+        void setIndexType(IndexType type) { m_indexType = type; }
 
+        void clear(); // clear all data
+
+        friend class DatabaseSerializer;
 
 
     private:
@@ -102,6 +122,6 @@ class VectorDatabase {
         
         std::function<double(const VectorXd&, const VectorXd&)> m_distanceFunction;
 
-        std::unique_ptr<flann::Index<flann::L2<double>>> m_flannIndex;
+        std::unique_ptr<LSHIndex> m_lshIndex;
         std::shared_ptr<flann::Matrix<double>> m_flannDataset;
 };
